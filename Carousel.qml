@@ -23,9 +23,9 @@ Item {
   property var shell: null
   property var pluginRegistry: null
   readonly property string pluginId: "io.github.iryzhkov.omadeck"
-  // Handed in by the shell on load, like `shell` and `pluginRegistry`; the env
-  // lookup only covers the moment before that assignment lands.
-  property string omarchyPath: Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy"
+  // Handed in by the shell on load, like `shell` and `pluginRegistry`. There is
+  // no fallback: until the shell has said where Omarchy lives, no helper runs.
+  property string omarchyPath: ""
   // cava.conf ships beside this file, so it is resolved from here rather than
   // from an assumed install location.
   readonly property string cavaConfigPath: String(Qt.resolvedUrl("cava.conf")).replace(/^file:\/\//, "")
@@ -64,6 +64,27 @@ Item {
     }
     return out
   }
+
+  // Every helper this plugin spawns goes through the same wrapper: a fixed
+  // absolute executable, a hard deadline (GNU timeout signals the child's own
+  // process group, TERM then KILL), and a byte ceiling enforced at the
+  // producer by head, so nothing past the cap is ever buffered in the shell.
+  // The environment is cleared and rebuilt with only what the scripts need.
+  function helperCommand(seconds, maxBytes, executable) {
+    return ["/usr/bin/timeout", "--kill-after=2", String(seconds),
+      "/bin/bash", "-c", '"$1" | /usr/bin/head -c "$2"',
+      "omadeck-helper", String(executable), String(maxBytes)]
+  }
+
+  readonly property var helperEnvironment: ({
+    PATH: omarchyPath + "/bin:/usr/local/bin:/usr/bin:/bin",
+    HOME: Quickshell.env("HOME"),
+    USER: Quickshell.env("USER"),
+    LANG: Quickshell.env("LANG") || "C.UTF-8",
+    XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR"),
+    PIPEWIRE_RUNTIME_DIR: Quickshell.env("PIPEWIRE_RUNTIME_DIR") || Quickshell.env("XDG_RUNTIME_DIR"),
+    OMARCHY_PATH: omarchyPath
+  })
 
   // Only file, data and web URLs are handed to Image. MPRIS art is usually a
   // file:// path or an https:// cover; anything else stays blank.
@@ -253,15 +274,12 @@ Item {
 
     running: root.opened && root.hasMedia && !root.spectrumUnavailable
     // Fixed executable and a minimal explicit environment: cava needs the
-    // Pipewire socket and nothing from the login profile.
+    // Pipewire socket and nothing from the login profile. It streams for as
+    // long as the card is up, so the only deadline is the `running` binding;
+    // Quickshell terminates it the moment that goes false.
     command: ["/usr/bin/cava", "-p", root.cavaConfigPath]
     clearEnvironment: true
-    environment: ({
-      PATH: "/usr/bin:/bin",
-      HOME: Quickshell.env("HOME"),
-      XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR"),
-      PIPEWIRE_RUNTIME_DIR: Quickshell.env("PIPEWIRE_RUNTIME_DIR") || Quickshell.env("XDG_RUNTIME_DIR")
-    })
+    environment: root.helperEnvironment
 
     stdout: SplitParser {
       splitMarker: "\n"
@@ -495,10 +513,33 @@ Item {
 
     opened = false
     dwellTimer.stop()
+    stopHelpers()
 
     if (shell && typeof shell.hide === "function")
       shell.hide(pluginId)
   }
+
+  // Explicit teardown for every helper that may still be running: closing the
+  // overview, and the plugin being unloaded, both end them rather than leaving
+  // a fetch to finish on its own. Setting `running` false sends TERM to the
+  // timeout wrapper, which forwards it to the helper's process group and
+  // escalates to KILL after two seconds; cava's own `running` binding has
+  // already gone false by the time this is called.
+  function stopHelpers() {
+    weatherProc.running = false
+    weatherIconProc.running = false
+  }
+
+  function startWeather() {
+    if (omarchyPath === "")
+      return
+    if (!weatherProc.running)
+      weatherProc.running = true
+    if (!weatherIconProc.running)
+      weatherIconProc.running = true
+  }
+
+  Component.onDestruction: stopHelpers()
 
   // Shell lifecycle. `omarchy-shell shell toggle <id>` drives both of these.
   function open(payload) {
@@ -509,10 +550,8 @@ Item {
     opened = true
     restartDwell()
 
-    if (dashboardTiles.indexOf("weather") !== -1) {
-      weatherProc.running = true
-      weatherIconProc.running = true
-    }
+    if (dashboardTiles.indexOf("weather") !== -1)
+      startWeather()
   }
 
   function close() {
@@ -521,11 +560,14 @@ Item {
 
   // The weather is a shell-out to Omarchy's own scripts, so it is fetched
   // when the strip opens and refreshed only while it stays up. Both run from
-  // a fixed path under $OMARCHY_PATH, and their output is capped before it is
-  // parsed: one line of status, one glyph.
+  // the path the shell handed over, under the helper wrapper: a 15 second
+  // deadline (the scripts' own curl timeouts are 4 and 3 seconds) and a byte
+  // ceiling at the producer, so the collector can never hold more than that.
   Process {
     id: weatherProc
-    command: [root.omarchyPath + "/bin/omarchy-weather-status"]
+    command: root.helperCommand(15, 256, root.omarchyPath + "/bin/omarchy-weather-status")
+    clearEnvironment: true
+    environment: root.helperEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.weatherText = root.boundText(text, 256).trim()
@@ -534,7 +576,9 @@ Item {
 
   Process {
     id: weatherIconProc
-    command: [root.omarchyPath + "/bin/omarchy-weather-icon"]
+    command: root.helperCommand(15, 64, root.omarchyPath + "/bin/omarchy-weather-icon")
+    clearEnvironment: true
+    environment: root.helperEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.weatherGlyph = root.boundText(text, 16).trim()
@@ -546,10 +590,7 @@ Item {
     interval: 600000
     repeat: true
     running: root.opened && root.dashboardTiles.indexOf("weather") !== -1
-    onTriggered: {
-      weatherProc.running = true
-      weatherIconProc.running = true
-    }
+    onTriggered: root.startWeather()
   }
 
   Timer {
