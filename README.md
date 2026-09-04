@@ -57,12 +57,9 @@ that many idle milliseconds instead.
 
 ### Optional: cava
 
-The spectrum in the media card comes from cava. Without it the card loses the
-bars and nothing else changes.
-
-```
-omarchy pkg add cava
-```
+The spectrum in the media card comes from cava, which is in the Arch `extra`
+repository as `cava`. Without it the card loses the bars and nothing else
+changes. The plugin never installs it for you.
 
 ## Dashboard
 
