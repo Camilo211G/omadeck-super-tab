@@ -65,16 +65,11 @@ Item {
     return out
   }
 
-  // Every helper this plugin spawns goes through the same wrapper: a fixed
-  // absolute executable, a hard deadline (GNU timeout signals the child's own
-  // process group, TERM then KILL), and a byte ceiling enforced at the
-  // producer by head, so nothing past the cap is ever buffered in the shell.
-  // The environment is cleared and rebuilt with only what the scripts need.
-  function helperCommand(seconds, maxBytes, executable) {
-    return ["/usr/bin/timeout", "--kill-after=2", String(seconds),
-      "/bin/bash", "-c", '"$1" | /usr/bin/head -c "$2"',
-      "omadeck-helper", String(executable), String(maxBytes)]
-  }
+  // Every helper this plugin spawns goes through BoundedHelper: a fixed
+  // absolute executable, a hard deadline, a byte ceiling counted at the
+  // producer, and a cleared environment rebuilt with only what the scripts
+  // need. A run that fails or overflows publishes nothing, so a truncated or
+  // killed read never reaches a card. See BoundedHelper.qml.
 
   readonly property var helperEnvironment: ({
     PATH: omarchyPath + "/bin:/usr/local/bin:/usr/bin:/bin",
@@ -526,17 +521,18 @@ Item {
   // escalates to KILL after two seconds; cava's own `running` binding has
   // already gone false by the time this is called.
   function stopHelpers() {
-    weatherProc.running = false
-    weatherIconProc.running = false
+    weatherProc.stop()
+    weatherIconProc.stop()
   }
 
   function startWeather() {
     if (omarchyPath === "")
       return
-    if (!weatherProc.running)
-      weatherProc.running = true
-    if (!weatherIconProc.running)
-      weatherIconProc.running = true
+
+    // start() is a no-op while a run is still in flight, so a refresh that
+    // lands on top of a slow fetch does not stack a second one.
+    weatherProc.start()
+    weatherIconProc.start()
   }
 
   Component.onDestruction: stopHelpers()
@@ -563,26 +559,24 @@ Item {
   // the path the shell handed over, under the helper wrapper: a 15 second
   // deadline (the scripts' own curl timeouts are 4 and 3 seconds) and a byte
   // ceiling at the producer, so the collector can never hold more than that.
-  Process {
+  BoundedHelper {
     id: weatherProc
-    command: root.helperCommand(15, 256, root.omarchyPath + "/bin/omarchy-weather-status")
-    clearEnvironment: true
+    executable: root.omarchyPath + "/bin/omarchy-weather-status"
+    seconds: 15
+    maxBytes: 256
+    maxChars: 256
     environment: root.helperEnvironment
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.weatherText = root.boundText(text, 256).trim()
-    }
+    onReady: function(text) { root.weatherText = text }
   }
 
-  Process {
+  BoundedHelper {
     id: weatherIconProc
-    command: root.helperCommand(15, 64, root.omarchyPath + "/bin/omarchy-weather-icon")
-    clearEnvironment: true
+    executable: root.omarchyPath + "/bin/omarchy-weather-icon"
+    seconds: 15
+    maxBytes: 64
+    maxChars: 16
     environment: root.helperEnvironment
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.weatherGlyph = root.boundText(text, 16).trim()
-    }
+    onReady: function(text) { root.weatherGlyph = text }
   }
 
   Timer {
