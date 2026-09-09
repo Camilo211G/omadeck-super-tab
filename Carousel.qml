@@ -183,7 +183,7 @@ Item {
   readonly property int panelHeight: finiteNum(pluginSetting("panelHeight", 340), 80, 2048, 340)
 
   function pluginSetting(name, fallback) {
-    var config = shell ? shell.shellConfig : null
+    var config = (shell && shell.shellConfig) ? shell.shellConfig : root.fileConfig
     var list = config && Array.isArray(config.plugins) ? config.plugins : []
 
     for (var i = 0; i < list.length; i++) {
@@ -196,6 +196,44 @@ Item {
     }
 
     return fallback
+  }
+
+  // Where those settings are read from depends on the shell. Omarchy up to
+  // 4.0.2 handed a plugin the whole shell config as `shell.shellConfig`; 4.0.3
+  // narrowed what a plugin receives to a capability-scoped API that carries
+  // the bar section and nothing else, so a plugin still reading the old
+  // property silently gets every default. The file the shell writes is read
+  // instead, and watched, so an edit applies without a restart.
+  //
+  // It is parsed rather than executed and only ever consulted for this
+  // plugin's own entry, and every value taken from it goes through finiteNum,
+  // boundText or sanitizeIds above before it reaches geometry, a key or a
+  // path. A file that is absent, unreadable, oversized or not valid JSON
+  // leaves the settings empty, which is the same as unset: the defaults.
+  readonly property string shellConfigPath: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+  readonly property int maxConfigChars: 1000000
+
+  property var fileConfig: ({})
+
+  function parseShellConfig(raw) {
+    var text = String(raw || "")
+    if (text.length > maxConfigChars || text.trim() === "") return ({})
+    try {
+      var parsed = JSON.parse(text)
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return ({})
+      return parsed
+    } catch (e) {
+      return ({})
+    }
+  }
+
+  FileView {
+    path: root.shellConfigPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.fileConfig = root.parseShellConfig(text())
+    onFileChanged: root.fileConfig = root.parseShellConfig(text())
+    onLoadFailed: root.fileConfig = ({})
   }
 
   readonly property var dashboardTiles: sanitizeIds(pluginSetting("dashboard", null),
@@ -467,8 +505,15 @@ Item {
       root.selectedIndex = index
   }
 
-  // Called by the service on every workspace change. Reports whether the strip
-  // was on screen to take it.
+  // Every workspace change, from wherever it came: a keybinding, a click in the
+  // bar, a window pulling focus, or this strip's own jumpTo. Reports whether
+  // the strip was on screen to take it.
+  //
+  // This used to be driven by the plugin's service half, which reached the
+  // strip through the shell's callIfLoaded(). Omarchy 4.0.3 narrowed what a
+  // plugin receives to a capability-scoped API with no way to call into
+  // another instance, so the strip listens to Hyprland itself. It is the same
+  // signal either way, one hop shorter, and it works on every shell version.
   function follow() {
     if (!opened)
       return "closed"
@@ -476,6 +521,12 @@ Item {
     syncSelection(true)
     restartDwell()
     return "ok"
+  }
+
+  Connections {
+    target: Hyprland
+
+    function onFocusedWorkspaceChanged() { root.follow() }
   }
 
   function jumpTo(index) {
