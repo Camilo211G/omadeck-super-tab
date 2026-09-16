@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.iryzhkov.omadeck",
-  "name": "Omadeck",
+  "id": "io.github.Camilo211G.omadeck-shifttab",
+  "name": "Omadeck Shift+TAB",
   "version": "2.0.1",
-  "author": "Igor Ryzhkov",
+  "author": "Camilo211G",
   "license": "MIT",
-  "description": "Full-screen overview: live plugin panels above a fanned deck of live workspace previews. Summoned on a key of your choosing, it takes no keys of its own and follows whatever workspace Hyprland focuses.",
+  "description": "Fork of Omadeck. Full-screen overview: live plugin panels above a fanned deck of live workspace previews. Designed to be summoned on Shift+TAB.",
   "kinds": [
     "overlay"
   ],
