@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.Camilo211G.omadeck-shifttab",
-  "name": "Omadeck Shift+TAB",
+  "id": "io.github.Camilo211G.omadeck-super-tab",
+  "name": "Omadeck Super+TAB",
   "version": "2.0.1",
   "author": "Camilo211G",
   "license": "MIT",
-  "description": "Fork of Omadeck. Full-screen overview: live plugin panels above a fanned deck of live workspace previews. Designed to be summoned on Shift+TAB.",
+  "description": "Fork of Omadeck. Full-screen overview: live plugin panels above a fanned deck of live workspace previews. Designed to be summoned on SUPER+TAB.",
   "kinds": [
     "overlay"
   ],
