@@ -29,13 +29,13 @@ upstream unchanged.
 ## Install
 
 ```
-omarchy plugin add https://github.com/Camilo211G/omadeck-super-tab.git --enable
+omarchy plugin add https://github.com/camilo211g/omadeck-super-tab.git --enable
 ```
 
 Then bind a key in `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + TAB", "Omadeck Super+TAB", "omarchy-shell shell toggle io.github.Camilo211G.omadeck-super-tab")
+o.bind("SUPER + TAB", "Omadeck Super+TAB", "omarchy-shell shell toggle io.github.camilo211g.omadeck-super-tab")
 ```
 
 For the dashboard row above the deck, add a `dashboard` entry to the plugin in
@@ -43,7 +43,7 @@ For the dashboard row above the deck, add a `dashboard` entry to the plugin in
 
 ```json
 {
-  "id": "io.github.Camilo211G.omadeck-super-tab",
+  "id": "io.github.camilo211g.omadeck-super-tab",
   "dashboard": ["omarchy.clock", "media", "omarchy.weather"]
 }
 ```
