@@ -126,7 +126,8 @@ Item {
   property color selectedBorder: Color.imagePicker.selectedBorder
   property color unselectedBorder: Color.imagePicker.unselectedBorder
 
-  // [{ wsId, label, monitor, windows: [{ toplevel, x, y, width, height }] }]
+  // Flat window list, one entry per toplevel on the focused monitor.
+  // [{ toplevel, workspaceId, monitor, x, y, width, height }]
   property var entries: []
   property int selectedIndex: 0
 
@@ -403,6 +404,10 @@ Item {
         continue
 
       out.push({
+        // `handle.wayland` is the XDG Toplevel Management surface. It is what
+        // ScreencopyView wants as a captureSource AND the only one of the two
+        // types that actually has `activate()`; HyprlandToplevel itself does
+        // not, despite what older references suggest.
         toplevel: handle.wayland,
         x: finiteNum(at[0], -32768, 32768, 0) - monitor.x,
         y: finiteNum(at[1], -32768, 32768, 0) - monitor.y,
@@ -410,26 +415,24 @@ Item {
         height: height
       })
 
-      if (out.length >= maxWindowsPerWorkspace)
+      if (out.length >= maxWindows)
         break
     }
 
     return out
   }
 
-  // Each captured window is an offscreen render, so a workspace stops at this
-  // many; the rest are the ones underneath anyway.
-  readonly property int maxWindowsPerWorkspace: 64
-  readonly property int maxWorkspaces: 64
+  // Each captured window is an offscreen render, so the deck caps at this many
+  // toplevels; the rest are the ones underneath anyway.
+  readonly property int maxWindows: 64
 
-  // Occupied workspaces on the focused monitor, plus wherever we are right now
-  // even when it is empty. That is the set `workspace e+1` walks, so the strip
-  // and SUPER+TAB agree on what counts as skippable.
+  // Flatten every toplevel on the focused monitor into a single deck.
+  // windowsFor already drops XWayland handles and zero-sized windows, so empty
+  // workspaces disappear from the deck without an extra check.
   function buildEntries() {
     Hyprland.refreshToplevels()
 
     var focusedMonitor = Hyprland.focusedMonitor
-    var focusedWorkspace = Hyprland.focusedWorkspace
     var values = Hyprland.workspaces.values
     var built = []
 
@@ -442,36 +445,36 @@ Item {
       if (focusedMonitor && monitor && monitor.id !== focusedMonitor.id)
         continue
 
-      var occupied = workspace.toplevels && workspace.toplevels.values.length > 0
-      var current = focusedWorkspace && workspace.id === focusedWorkspace.id
-      if (!occupied && !current)
-        continue
+      var wins = windowsFor(workspace, monitor)
+      for (var j = 0; j < wins.length; j++) {
+        built.push({
+          toplevel: wins[j].toplevel,
+          workspaceId: workspace.id,
+          monitor: monitor,
+          x: wins[j].x,
+          y: wins[j].y,
+          width: wins[j].width,
+          height: wins[j].height
+        })
+        if (built.length >= maxWindows)
+          break
+      }
 
-      built.push({
-        wsId: workspace.id,
-        label: workspace.name && workspace.name !== String(workspace.id)
-          ? boundText(workspace.name, 128)
-          : "Workspace " + workspace.id,
-        monitor: monitor,
-        windows: windowsFor(workspace, monitor)
-      })
-
-      if (built.length >= maxWorkspaces)
+      if (built.length >= maxWindows)
         break
     }
 
-    built.sort(function(left, right) { return left.wsId - right.wsId })
+    // Stable order: by workspace, then by the position the workspace itself
+    // reports (Hyprland sends toplevels in stacking order, newest on top, so
+    // the focused window lands at the end of its workspace's run).
+    built.sort(function(left, right) {
+      if (left.workspaceId !== right.workspaceId)
+        return left.workspaceId - right.workspaceId
+      return right.y - left.y
+    })
 
     root.entries = built
-    syncSelection(false)
-  }
-
-  function indexOfWorkspace(wsId) {
-    for (var i = 0; i < entries.length; i++)
-      if (entries[i].wsId === wsId)
-        return i
-
-    return -1
+    syncFocusedWindow()
   }
 
   function screenForMonitor(monitor) {
@@ -486,39 +489,54 @@ Item {
     return null
   }
 
-  // Point the strip at whatever Hyprland has focused. Entries are rebuilt only
-  // when the focused workspace is missing from them, because replacing the
-  // array tears down every ScreencopyView and rebuilds it, which flickers and
-  // costs an offscreen render per window.
-  function syncSelection(allowRebuild) {
-    var focused = Hyprland.focusedWorkspace
-    if (!focused)
-      return
-
-    var index = indexOfWorkspace(focused.id)
-    if (index < 0 && allowRebuild !== false) {
-      buildEntries()
-      index = indexOfWorkspace(focused.id)
+  // Point the strip at whatever window Hyprland actually has focused. Used at
+  // build time and whenever the focused workspace changes while the deck is up,
+  // so the centered panel always matches what ALT+TAB would land on.
+  function syncFocusedWindow() {
+    var active = Hyprland.activeToplevel
+    var index = -1
+    if (active) {
+      for (var i = 0; i < entries.length; i++) {
+        if (entries[i].toplevel === active) {
+          index = i
+          break
+        }
+      }
     }
+
+    if (index < 0) {
+      var focused = Hyprland.focusedWorkspace
+      if (focused) {
+        for (var j = 0; j < entries.length; j++) {
+          if (entries[j].workspaceId === focused.id) {
+            index = j
+            break
+          }
+        }
+      }
+    }
+
+    if (index < 0 && entries.length > 0)
+      index = 0
 
     if (index >= 0)
       root.selectedIndex = index
   }
 
-  // Every workspace change, from wherever it came: a keybinding, a click in the
-  // bar, a window pulling focus, or this strip's own jumpTo. Reports whether
-  // the strip was on screen to take it.
-  //
-  // This used to be driven by the plugin's service half, which reached the
-  // strip through the shell's callIfLoaded(). Omarchy 4.0.3 narrowed what a
-  // plugin receives to a capability-scoped API with no way to call into
-  // another instance, so the strip listens to Hyprland itself. It is the same
-  // signal either way, one hop shorter, and it works on every shell version.
+  // Every workspace or focus change, from wherever it came: a keybinding, a
+  // click in the bar, a window pulling focus. The strip listens to Hyprland
+  // itself (Omarchy 4.0.3 narrowed what a plugin receives to a capability-scoped
+  // API with no way to call into another instance, so the patch lives here).
+  // Reports whether the strip was on screen to take it.
   function follow() {
     if (!opened)
       return "closed"
 
-    syncSelection(true)
+    // A workspace switch can move the focused window between entries we
+    // already have; only rebuild when the new focused window isn't in the
+    // list yet (because tearing entries down flickers every ScreencopyView).
+    buildEntries()
+    syncFocusedWindow()
     restartDwell()
     return "ok"
   }
@@ -529,23 +547,45 @@ Item {
     function onFocusedWorkspaceChanged() { root.follow() }
   }
 
-  function jumpTo(index) {
-    var entry = entries[index]
-    if (!entry)
-      return
+  // Each entry is one window now, so the cycle/commit pair walks `entries`
+  // directly. Both no-op when there is at most one entry.
+  function focusedEntry() {
+    if (selectedIndex < 0 || selectedIndex >= entries.length)
+      return null
+    return entries[selectedIndex]
+  }
 
-    // The id came from Hyprland, but it is about to go back into a dispatch
-    // string, so only a positive integer is allowed through.
-    var wsId = Number(entry.wsId)
-    if (!Number.isInteger(wsId) || wsId <= 0)
+  function cycleWindow(direction) {
+    if (entries.length <= 1)
       return
-
+    var step = direction >= 0 ? 1 : -1
+    var next = (selectedIndex + step) % entries.length
+    if (next < 0)
+      next += entries.length
+    selectedIndex = next
     restartDwell()
+  }
 
-    // This Hyprland fork parses dispatch arguments as Lua, so the plain
-    // `workspace 3` form does not survive the trip. Same expression the bar's
-    // workspace widget uses. The switch comes back to us through follow().
-    Hyprland.dispatch("hl.dsp.focus({ workspace = \"" + wsId + "\" })")
+  function activateEntry(index) {
+    var entry = entries[index]
+    if (!entry || !entry.toplevel) {
+      hideSelf()
+      return
+    }
+    entry.toplevel.activate()
+    hideSelf()
+    // The deck holds exclusive keyboard focus; closing the layer shell lets
+    // Hyprland restore focus to the previously active window. Re-apply the
+    // activation on the next event loop tick so it lands after that restore.
+    var pick = entry
+    Qt.callLater(function() {
+      if (pick && pick.toplevel)
+        pick.toplevel.activate()
+    })
+  }
+
+  function commitWindow() {
+    activateEntry(selectedIndex)
   }
 
   function restartDwell() {
@@ -594,8 +634,10 @@ Item {
     if (entries.length === 0)
       return
 
+    syncFocusedWindow()
     opened = true
     restartDwell()
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
 
     if (dashboardTiles.indexOf("weather") !== -1)
       startWeather()
@@ -1172,11 +1214,44 @@ Item {
     color: "transparent"
     WlrLayershell.namespace: "omarchy-omadeck"
     WlrLayershell.layer: WlrLayer.Overlay
-    // Never take focus. The workspace keys stay with Hyprland and with whatever
-    // window is underneath. Embedded plugin panels never open their own popup
-    // window, so nothing here needs a focus grab.
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    // Take exclusive focus while up so TAB and ENTER drive app selection
+    // instead of falling through to whatever widget was focused before.
+    // Hyprland handles its own bindings (SUPER+TAB, etc.) at the compositor
+    // before keys reach us, so workspace cycling keeps working.
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
+
+    // PanelWindow is a Window and has no `focus` property of its own, so the
+    // key handler lives on a focus-grabbing Item child. Putting it first means
+    // TAB/ENTER reach it before any descendant (cards, dashboard tiles) can
+    // consume the key. Hyprland still handles its own bindings (SUPER+TAB etc.)
+    // at the compositor before keys get here.
+    Item {
+      id: keyCatcher
+      anchors.fill: parent
+      focus: true
+      Keys.priority: Keys.BeforeItem
+      Keys.onPressed: function(event) {
+        if (!root.opened)
+          return
+
+        if (event.key === Qt.Key_Tab) {
+          root.cycleWindow(event.modifiers & Qt.ShiftModifier ? -1 : 1)
+          event.accepted = true
+          return
+        }
+        if (event.key === Qt.Key_Backtab) {
+          root.cycleWindow(-1)
+          event.accepted = true
+          return
+        }
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+          root.commitWindow()
+          event.accepted = true
+          return
+        }
+      }
+    }
 
     Rectangle {
       anchors.fill: parent
@@ -1381,60 +1456,23 @@ Item {
                 color: root.dimColor
                 clip: true
 
-                // The workspace at monitor scale, cropped to cover the panel,
-                // so window positions stay true instead of being stretched.
-                Item {
-                  id: stage
-
-                  readonly property var monitor: slice.entry ? slice.entry.monitor : null
-                  // Hyprland reports monitors in physical pixels and window
-                  // rects in logical ones, so the stage has to be the logical
-                  // size or every window lands scaled down inside a margin.
-                  readonly property real monitorScale: monitor && monitor.scale > 0 ? monitor.scale : 1
-                  readonly property real monitorWidth: monitor && monitor.width > 0 ? monitor.width / monitorScale : 1920
-                  readonly property real monitorHeight: monitor && monitor.height > 0 ? monitor.height / monitorScale : 1080
-                  readonly property real coverScale: Math.max(parent.width / monitorWidth, parent.height / monitorHeight)
-
-                  width: monitorWidth * coverScale
-                  height: monitorHeight * coverScale
-                  anchors.centerIn: parent
-
-                  Repeater {
-                    model: slice.captureActivated && slice.entry ? slice.entry.windows.length : 0
-
-                    delegate: Item {
-                      id: windowSlot
-
-                      required property int index
-
-                      // Not `data`: Item already owns that name as its default
-                      // property, and shadowing it breaks child assignment.
-                      readonly property var spec: slice.entry.windows[index]
-
-                      x: spec.x * stage.coverScale
-                      y: spec.y * stage.coverScale
-                      width: spec.width * stage.coverScale
-                      height: spec.height * stage.coverScale
-                      z: index
-
-                      ScreencopyView {
-                        anchors.fill: parent
-                        captureSource: windowSlot.spec.toplevel
-                        // A still frame per summon. Live capture would keep
-                        // every offscreen workspace rendering for as long as
-                        // the strip is up.
-                        live: false
-                        paintCursor: false
-                      }
-                    }
-                  }
+                // One window per panel: a still ScreencopyView of the toplevel
+                // captured when the entry first comes near the selection. A
+                // live capture would keep every offscreen window rendering for
+                // the whole time the strip is up.
+                ScreencopyView {
+                  anchors.fill: parent
+                  visible: slice.captureActivated && slice.entry && slice.entry.toplevel
+                  captureSource: slice.entry ? slice.entry.toplevel : null
+                  live: false
+                  paintCursor: false
                 }
 
                 Rectangle {
                   anchors.fill: parent
                   // The focused panel is lit; deeper in the stack means
                   // further from the light. Kept light enough that the panel
-                  // behind still reads as a workspace rather than a shadow.
+                  // behind still reads as another window rather than a shadow.
                   color: Util.alpha(root.dimColor, slice.selected ? 0 : Math.min(0.62, 0.24 + 0.08 * (slice.depth - 1)))
 
                   Behavior on color {
@@ -1453,12 +1491,7 @@ Item {
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  if (slice.selected)
-                    root.hideSelf()
-                  else
-                    root.jumpTo(slice.index)
-                }
+                onClicked: root.activateEntry(slice.index)
               }
             }
           }
