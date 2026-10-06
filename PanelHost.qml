@@ -19,6 +19,8 @@ Item {
   property string pluginId: ""
   property var bar: null
   property var pluginRegistry: null
+  // <omarchyPath>/shell/plugins/panels/<name>/Panel.qml, for first-party panels.
+  property string omarchyPath: ""
 
   // Own-property lookup only: an id such as "__proto__" must not resolve to
   // something inherited from Object.
@@ -33,6 +35,29 @@ Item {
   }
   readonly property bool installed: manifest !== null
 
+  readonly property var firstPartyIdPattern: /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+  // Omarchy 4.0.3+ hands a third-party plugin a registry view that lists only
+  // its own manifest, so a first-party panel cannot be looked up through
+  // `pluginRegistry`. Omarchy keeps every first-party panel at
+  // <omarchyPath>/shell/plugins/panels/<name>/Panel.qml, so `omarchy.<name>`
+  // is resolved against the Omarchy tree directly.
+  function firstPartyPanelPath(id) {
+    var s = String(id || "")
+    if (s.indexOf("omarchy.") !== 0)
+      return ""
+
+    var name = s.slice("omarchy.".length)
+    if (name === "" || name.indexOf("..") !== -1 || !firstPartyIdPattern.test(name))
+      return ""
+
+    var base = String(omarchyPath || "").replace(/\/$/, "")
+    if (base === "" || base.indexOf("/") !== 0)
+      return ""
+
+    return Util.fileUrl(base + "/shell/plugins/panels/" + name + "/Panel.qml")
+  }
+
   // `entryPoints.panel` when the plugin declares one. A bar-widget plugin
   // keeps its panel as an undeclared sibling file, which is why the fallback
   // is the conventional name rather than a manifest lookup.
@@ -41,26 +66,27 @@ Item {
   // loaded here is chosen by this plugin, so the same rule is applied again:
   // a relative path with no `..`, resolving inside the plugin's own folder.
   readonly property string panelPath: {
-    if (!installed)
-      return ""
+    if (installed) {
+      var dir = String(manifest.__sourceDir || "").replace(/\/$/, "")
+      if (dir === "" || dir.indexOf("/") !== 0)
+        return ""
 
-    var dir = String(manifest.__sourceDir || "").replace(/\/$/, "")
-    if (dir === "" || dir.indexOf("/") !== 0)
-      return ""
+      var entries = manifest.entryPoints && typeof manifest.entryPoints === "object"
+        ? manifest.entryPoints : ({})
+      var relative = typeof entries.panel === "string" && entries.panel !== ""
+        ? entries.panel : "Panel.qml"
+      if (relative.length > 256 || relative.indexOf("/") === 0
+          || relative.indexOf("..") !== -1 || relative.indexOf("\n") !== -1)
+        return ""
 
-    var entries = manifest.entryPoints && typeof manifest.entryPoints === "object"
-      ? manifest.entryPoints : ({})
-    var relative = typeof entries.panel === "string" && entries.panel !== ""
-      ? entries.panel : "Panel.qml"
-    if (relative.length > 256 || relative.indexOf("/") === 0
-        || relative.indexOf("..") !== -1 || relative.indexOf("\n") !== -1)
-      return ""
+      var resolved = dir + "/" + relative
+      if (resolved.indexOf(dir + "/") !== 0)
+        return ""
 
-    var resolved = dir + "/" + relative
-    if (resolved.indexOf(dir + "/") !== 0)
-      return ""
+      return Util.fileUrl(resolved)
+    }
 
-    return Util.fileUrl(resolved)
+    return firstPartyPanelPath(pluginId)
   }
 
   property var popup: null
@@ -241,13 +267,18 @@ Item {
   Loader {
     id: panelLoader
 
-    active: root.installed && root.panelPath !== "" && !root.unembeddable
+    active: root.panelPath !== "" && !root.unembeddable
     source: root.panelPath
     // Kept visible until the content moves: an invisible Loader leaves its
     // children with no effective size, and they never lay out.
     visible: !root.adopted
     width: root.width
     height: root.height
+
+    onStatusChanged: {
+      if (status === Loader.Error)
+        root.unembeddable = true
+    }
 
     onLoaded: {
       if (!item)

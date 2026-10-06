@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Services.Mpris
 import qs.Commons
 
 // Workspace strip: one evenly sized panel per workspace, the focused one
@@ -22,7 +23,7 @@ Item {
 
   property var shell: null
   property var pluginRegistry: null
-  readonly property string pluginId: "io.github.iryzhkov.omadeck"
+  readonly property string pluginId: "io.github.camilo211g.omadeck-super-tab"
   // Handed in by the shell on load, like `shell` and `pluginRegistry`. There is
   // no fallback: until the shell has said where Omarchy lives, no helper runs.
   property string omarchyPath: ""
@@ -91,7 +92,7 @@ Item {
   // Layout knobs. Each one is read from this plugin's entry in shell.json and
   // clamped, so a hand-edited value cannot size a panel to nothing or to
   // something the compositor refuses:
-  //   { "id": "io.github.iryzhkov.omadeck", "sliceWidth": 720, "dwellMs": 4000 }
+  //   { "id": "io.github.camilo211g.omadeck-super-tab", "sliceWidth": 720, "dwellMs": 4000 }
 
   // Every panel is the same size at every position. Nothing grows or shrinks as
   // the selection moves; panels slide and change places in the stack.
@@ -157,7 +158,7 @@ Item {
 
   // Dashboard cards above the stack, in the order given. Configured on this
   // plugin's entry in ~/.config/omarchy/shell.json:
-  //   { "id": "io.github.iryzhkov.omadeck",
+  //   { "id": "io.github.camilo211g.omadeck-super-tab",
   //     "dashboard": ["omarchy.clock", "media", "omarchy.weather"] }
   // An empty array turns the row off.
   readonly property int tileHeight: finiteNum(pluginSetting("tileHeight", 112), 60, 600, 112)
@@ -255,9 +256,80 @@ Item {
     return pluginRegistry.entryPointUrl(installed[key], "barWidget")
   }
 
-  readonly property var mediaService: shell && typeof shell.serviceFor === "function"
+  // Omarchy's `omarchy.media` service is reachable only by plugins with bar
+  // capabilities; a third-party overlay such as this one gets no first-party
+  // services at all on 4.0.3+, so `serviceFor("omarchy.media")` returns null
+  // and the media card never leaves "NOTHING PLAYING". Fall back to
+  // Quickshell's own MPRIS registry, which sees every player on the session
+  // bus regardless of the shell's plugin scoping.
+  readonly property var shellMediaService: shell && typeof shell.serviceFor === "function"
     ? shell.serviceFor("omarchy.media")
     : null
+
+  readonly property var mprisPlayers: Mpris.players ? Mpris.players.values : []
+
+  // playerctld mirrors another player rather than being one, so it loses.
+  function isProxyPlayer(player) {
+    var dbusName = String(player && player.dbusName || "").toLowerCase()
+    var desktopEntry = String(player && player.desktopEntry || "").toLowerCase()
+    return dbusName.indexOf("playerctld") !== -1 || desktopEntry === "playerctld"
+  }
+
+  // A miniature of Omarchy's media service ordering: the playing player with
+  // track metadata wins, then any playing player, then any player with
+  // metadata. Enough to follow what is actually making sound.
+  readonly property var mprisActivePlayer: {
+    var list = mprisPlayers
+    var playingMeta = null
+    var playing = null
+    var meta = null
+
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i]
+      if (!p || isProxyPlayer(p)) continue
+
+      var hasMeta = !!(p.trackTitle || p.trackArtist)
+      if (p.isPlaying && hasMeta && !playingMeta) playingMeta = p
+      else if (p.isPlaying && !playing) playing = p
+      else if (hasMeta && !meta) meta = p
+    }
+
+    return playingMeta || playing || meta || null
+  }
+
+  // The subset of Omarchy's media service interface the card reads, backed by
+  // Mpris directly so no shell service is needed.
+  QtObject {
+    id: localMediaService
+
+    readonly property var activePlayer: root.mprisActivePlayer
+    readonly property bool hasMedia: activePlayer !== null
+      && !!(activePlayer.trackTitle || activePlayer.trackArtist)
+    readonly property string title: activePlayer && activePlayer.trackTitle ? activePlayer.trackTitle : ""
+    readonly property string artist: activePlayer && activePlayer.trackArtist ? activePlayer.trackArtist : ""
+    readonly property string artUrl: activePlayer && activePlayer.trackArtUrl ? activePlayer.trackArtUrl : ""
+
+    function playerKey(player) {
+      return player ? String(player.dbusName || player.identity || "") : ""
+    }
+
+    function runAction(action, showFeedback, targetKey) {
+      var player = root.mprisActivePlayer
+      if (!player) return
+
+      if (action === "next") {
+        if (player.canGoNext) player.next()
+      } else if (action === "previous") {
+        if (player.canGoPrevious) player.previous()
+      } else if (action === "playPause") {
+        if (player.canTogglePlaying) player.togglePlaying()
+        else if (player.isPlaying && player.canPause) player.pause()
+        else if (!player.isPlaying && player.canPlay) player.play()
+      }
+    }
+  }
+
+  readonly property var mediaService: shellMediaService || localMediaService
   readonly property bool hasMedia: mediaService ? mediaService.hasMedia === true : false
   readonly property var activePlayer: mediaService ? mediaService.activePlayer : null
 
@@ -1346,6 +1418,7 @@ Item {
                 pluginId: String(dashboardCard.modelData)
                 bar: hostBar
                 pluginRegistry: root.pluginRegistry
+                omarchyPath: root.omarchyPath
               }
             }
           }
